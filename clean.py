@@ -1,8 +1,8 @@
 from DbConnector import DbConnector
+from pprint import pprint
 import pandas as pd
 import ast
 import unicodedata
-
 
 def parse_json(x):
     if pd.isna(x) or x == "":
@@ -18,6 +18,19 @@ def normalize_term(s: str) -> str:
     return " ".join(s.split())
 
 
+def normalize_id(s: pd.Series) -> pd.Series:
+    cleaned = (s.astype('string')
+                 .str.strip()
+                 .str.lower()
+                 .str.replace(r'^tt', '', regex=True)
+                 .str.replace(r'\D+', '', regex=True))
+    return pd.to_numeric(cleaned, errors='coerce').astype('Int64')
+
+def create_coll(self, collection_name):
+    collection = self.db.create_collection(collection_name)
+    print('Created collection: ', collection)
+
+
 class MoviePipeline:
     def __init__(self):
         self.connection = DbConnector()
@@ -25,15 +38,17 @@ class MoviePipeline:
         self.db = self.connection.db
 
     def clean_movies(self):
-        df_movies = pd.read_csv("movies_metadata.csv",
+        df_movies = pd.read_csv("movies/movies_metadata.csv",
                                 engine="python",
                                 quotechar='"',
                                 escapechar='\\',
                                 on_bad_lines='warn')
+
         # Change budget to numeric (number or NaN values)
         df_movies['budget'] = pd.to_numeric(df_movies['budget'], errors='coerce')
         df_movies['popularity'] = pd.to_numeric(df_movies['popularity'], errors='coerce')
         df_movies['id'] = pd.to_numeric(df_movies['id'], errors='coerce')
+
         # Drop NaN values, as they should not exist in id,budget and revenue.
         df_movies = df_movies.dropna(subset=['id', 'budget', 'revenue'])
         df_movies[['id', 'budget', 'revenue']] = df_movies[['id', 'budget', 'revenue']].astype('int64')
@@ -41,10 +56,11 @@ class MoviePipeline:
             by=['vote_count', 'popularity'],
             ascending=[False, False]
         )
+
         # Drop duplicates based on movie ID, keeping the most recent one
         df_movies = df_movies.drop_duplicates(subset='id', keep='first')
-
         df_movies = df_movies.reset_index(drop=True)
+
         # Embedded columns
         cols = [
             "belongs_to_collection", "genres",
@@ -63,10 +79,16 @@ class MoviePipeline:
         df_movies['video'] = df_movies['video'].fillna(False).astype(bool)
         df_movies['release_date'] = pd.to_datetime(df_movies['release_date'], errors='coerce')
         df_movies = df_movies.drop(['poster_path', 'homepage'], axis=1, errors='ignore')
+
+        # Normalize imdbId to only contain numbers
+        df_movies['imdb_id'] = normalize_id(df_movies['imdb_id'])
+
+        df_movies = df_movies.rename(columns={'id': 'tmdbId', 'imdb_id': 'imdbId'})
+
         return df_movies
 
     def clean_links(self):
-        df_links = pd.read_csv("links_small.csv", )
+        df_links = pd.read_csv("movies/links.csv", )
         # Drop links that are NaN
         df_links = df_links.dropna(subset=['movieId', 'tmdbId', 'imdbId'])
         # Drop duplicates
@@ -76,7 +98,7 @@ class MoviePipeline:
         return df_links
 
     def clean_ratings(self):
-        df_ratings = pd.read_csv("ratings_small.csv")
+        df_ratings = pd.read_csv("movies/ratings.csv")
         # Ratings can only be in this set
         valid_ratings = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0}
         # check if it is in this sete
@@ -92,13 +114,13 @@ class MoviePipeline:
 
         ex_crew = (
             df_credits[["id", "crew"]]
-            .rename(columns={"id": "movie_id"})
+            .rename(columns={"id": "tmdbId"})
             .explode("crew", ignore_index=True)
         )
 
         ex_cast = (
             df_credits[["id", "cast"]]
-            .rename(columns={"id": "movie_id"})
+            .rename(columns={"id": "tmdbId"})
             .explode("cast", ignore_index=True)
         )
 
@@ -111,15 +133,15 @@ class MoviePipeline:
 
         # Normalize dicts to columns
         df_crew = pd.json_normalize(ex_crew["crew"])
-        df_crew["movie_id"] = ex_crew["movie_id"].values
+        df_crew["tmdbId"] = ex_crew["tmdbId"].values
 
         df_cast = pd.json_normalize(ex_cast["cast"])
-        df_cast["movie_id"] = ex_cast["movie_id"]
+        df_cast["tmdbId"] = ex_cast["tmdbId"]
 
         # Select columns to keep
-        df_crew = df_crew[["movie_id", "id", "name", "gender", "department", "job"]]
+        df_crew = df_crew[["tmdbId", "id", "name", "gender", "department", "job"]]
 
-        df_cast = df_cast[["movie_id", "id", "name", "gender", "character", "order"]]
+        df_cast = df_cast[["tmdbId", "id", "name", "gender", "character", "order"]]
 
         # Types and validation
         df_crew["id"] = pd.to_numeric(df_crew["id"], errors="coerce").astype("Int64")
@@ -135,8 +157,8 @@ class MoviePipeline:
         df_cast["character"] = df_cast["character"].astype("string")
 
         # Removing duplicates, defining dedupe keys
-        cast_subset = ["movie_id", "id", "character"]
-        crew_subset = ["movie_id", "id", "job", "department"]
+        cast_subset = ["tmdbId", "id", "character"]
+        crew_subset = ["tmdbId", "id", "job", "department"]
 
         # Count number of duplicates (extra copies beyond the first)
         cast_duplicates = df_cast[cast_subset].dropna().duplicated().sum()
@@ -160,19 +182,19 @@ class MoviePipeline:
 
         cast_grouped = (
             df_cast
-            .groupby("movie_id", dropna=False)[["id", "name", "gender", "character", "order"]]
+            .groupby("tmdbId", dropna=False)[["id", "name", "gender", "character", "order"]]
             .apply(lambda g: g.dropna(how="all").to_dict("records"))
             .reset_index(name="cast")
         )
 
         crew_grouped = (
             df_crew
-            .groupby("movie_id", dropna=False)[["id", "name", "gender", "department", "job"]]
+            .groupby("tmdbId", dropna=False)[["id", "name", "gender", "department", "job"]]
             .apply(lambda g: g.dropna(how="all").to_dict("records"))
             .reset_index(name="crew")
         )
 
-        credits_df = cast_grouped.merge(crew_grouped, on="movie_id", how="outer")
+        credits_df = cast_grouped.merge(crew_grouped, on="tmdbId", how="outer")
         credits_df = credits_df.astype({"cast": "object", "crew": "object"})
 
         for col in ["cast", "crew"]:
@@ -187,7 +209,7 @@ class MoviePipeline:
 
         ex_keywords = (
             df_keywords[["id", "keywords"]]
-            .rename(columns={"id": "movie_id"})
+            .rename(columns={"id": "tmdbId"})
             .explode("keywords", ignore_index=True)
         )
 
@@ -197,17 +219,17 @@ class MoviePipeline:
 
         # Normalize dicts to columns
         df_keywords = pd.json_normalize(ex_keywords["keywords"])
-        df_keywords["movie_id"] = ex_keywords["movie_id"].values
+        df_keywords["tmdbId"] = ex_keywords["tmdbId"].values
 
         # Select columns to keep
-        df_keywords = df_keywords[["movie_id", "id", "name"]]
+        df_keywords = df_keywords[["tmdbId", "id", "name"]]
 
         # Types and validation
         df_keywords["id"] = pd.to_numeric(df_keywords["id"], errors="coerce").astype("Int64")
         df_keywords["name"] = df_keywords["name"].astype("string")
 
         # Removing duplicates, defining dedupe keys
-        keywords_subset = ["movie_id", "id", "name"]
+        keywords_subset = ["tmdbId", "id", "name"]
 
         # Count number of duplicates (extra copies beyond the first)
         keywords_duplicates = df_keywords[keywords_subset].dropna().duplicated().sum()
@@ -225,13 +247,89 @@ class MoviePipeline:
             df_keywords
             .dropna(subset=["name"])
             .assign(name=lambda d: d["name"].map(lambda x: normalize_term(str(x))))
-            .groupby("movie_id", dropna=False)["name"]
+            .groupby("tmdbId", dropna=False)["name"]
             .apply(lambda s: s.drop_duplicates().tolist())  # preserves first occurrence
             .reset_index(name="keywords")
         )
 
         df_keywords = keywords_grouped
         return df_keywords
+
+    def merge_movies_and_links(self, df_movies, df_links):
+        df_movies = df_movies.merge(df_links, on=['imdbId', 'tmdbId'], how='left')
+        df_movies["movieId"] = df_movies["movieId"].astype("Int64")
+
+        return df_movies
+
+    def merge_keywords(self, df_movies, df_links):
+        df_movies = df_movies.merge(df_links, on=['tmdbId'], how='left')
+        return df_movies
+
+    def create_coll(self, collection_name):
+        existing = self.db.list_collection_names()
+
+        if collection_name not in existing:
+            collection = self.db.create_collection(collection_name)
+            print('Created collection: ', collection)
+        else:
+            print('Collection already exists: ', collection_name)
+
+    def drop_coll(self, collection_name):
+        collection = self.db[collection_name]
+        collection.drop()
+
+    def insert_documents(self, collection_name, df):
+        collection = self.db[collection_name]
+        documents = df.to_dict("records")
+        collection.insert_many(documents)
+        print("Inserted documents: ", len(documents))
+
+    def show_coll(self):
+        collections = self.client['movie_db'].list_collection_names()
+        print(collections)
+
+
+def main():
+    program = None
+    try:
+        program = MoviePipeline()
+
+        program.create_coll(collection_name="Movie")
+        program.create_coll(collection_name="Credits")
+        program.create_coll(collection_name="Ratings")
+
+        df_movies = program.clean_keywords()
+        df_links = program.clean_links()
+        df_credits = program.clean_credits()
+        df_ratings = program.clean_ratings()
+        df_keywords = program.clean_keywords()
+
+        df_movies = program.merge_movies_and_links(df_movies, df_links)
+        df_movies = program.merge_keywords(df_movies, df_keywords)
+
+        program.insert_documents("Movie", df_movies)
+        program.insert_documents("Credits", df_credits)
+        program.insert_documents("Ratings", df_ratings)
+
+        #program.drop_coll(collection_name="Movie")
+        #program.drop_coll(collection_name="Credits")
+        #program.drop_coll(collection_name="Ratings")
+
+
+
+        program.show_coll()
+    except Exception as e:
+        print("ERROR: Failed to use database:", e)
+    finally:
+        if program:
+            program.connection.close_connection()
+
+
+if __name__ == '__main__':
+    main()
+
+
+
 
 
 

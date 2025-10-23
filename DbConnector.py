@@ -13,7 +13,7 @@ class DbConnector:
     """
 
     def __init__(self,
-                 DATABASE='film_db',
+                 DATABASE='movie_db',
                  HOST="tdt4225-66.idi.ntnu.no",
                  USER="test_user",
                  PASSWORD="password"):
