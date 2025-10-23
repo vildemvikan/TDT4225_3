@@ -1,7 +1,7 @@
 import pandas as pd
 import ast
 
-df_movies = pd.read_csv("movies_metadata.csv",
+df_movies = pd.read_csv("movies/movies_metadata.csv",
                         engine="python",
                         quotechar='"',
                         escapechar='\\',
@@ -9,8 +9,8 @@ df_movies = pd.read_csv("movies_metadata.csv",
 
 # df_credits = pd.read_csv("credits.csv")
 # df_keywords = pd.read_csv("keywords.csv")
-df_links = pd.read_csv("links_small.csv")
-df_ratings = pd.read_csv("ratings_small.csv")
+df_links = pd.read_csv("movies/links_small.csv")
+df_ratings = pd.read_csv("movies/ratings_small.csv")
 
 def print_dash():
     print('-'*80)
@@ -55,8 +55,8 @@ invalid_adult = df_movies[~df_movies['video'].isin([True, False])]
 print(len(invalid_adult[['id']]))
 df_movies['release_date'] = pd.to_datetime(df_movies['release_date'], errors='coerce')
 
-
 df_movies = df_movies.drop(['poster_path', 'homepage'], axis=1, errors='ignore')
+
 
 
 print(df_movies.dtypes)
@@ -64,10 +64,48 @@ print(df_movies.dtypes)
 print(df_links.dtypes)
 print(df_ratings.dtypes)
 nan_links = df_links[df_links['tmdbId'].isna()]
+nan_time = df_movies[df_movies['release_date'].isna()]
+print(len(nan_time))
+print(nan_time[['title','id']])
 df_links = df_links.dropna(subset=['movieId', 'tmdbId', 'imdbId'])
 df_links = df_links.drop_duplicates(subset=['movieId'])
 df_links['tmdbId'] = df_links['tmdbId'].astype('int64')
-
+movie = df_movies[df_movies['adult']==True]
 print(nan_links)
+
+duplicate_ids = df_movies[df_movies.duplicated(subset='id', keep=False)]['id'].unique()
+print(f"Found {len(duplicate_ids)} duplicate movie IDs.")
+
+if len(duplicate_ids) > 0:
+    print("\nDuplicate movie IDs:")
+    print(duplicate_ids)
+
+    # Show what those duplicates look like (optional)
+    for movie_id, group in df_movies[df_movies['id'].isin(duplicate_ids)].groupby('id'):
+        print(f"\n--- Before Cleaning: Movie ID {movie_id} ---")
+        print(group[['id', 'title', 'vote_count', 'popularity']].to_string(index=False))
+df_movies = df_movies.sort_values(
+    by=['vote_count', 'popularity'],
+    ascending=[False, False]
+)
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+pd.set_option('display.max_colwidth', None)
+
+
+df_movies = df_movies.drop_duplicates(subset='id', keep='first')
+
+df_movies = df_movies.reset_index(drop=True)
+remaining_ids = df_movies[df_movies['id'].isin(duplicate_ids)]['id'].unique()
+removed_ids = set(duplicate_ids) - set(remaining_ids)
+
+print("\nuplicates handled successfully.")
+print(f"Removed {len(removed_ids)} duplicate entries, retained {len(remaining_ids)} unique IDs.")
+
+if len(remaining_ids) > 0:
+    print("\nMovies that had duplicates but were kept:")
+    print(df_movies[df_movies['id'].isin(remaining_ids)][['id', 'title', 'vote_count', 'popularity']])
+
 
 
