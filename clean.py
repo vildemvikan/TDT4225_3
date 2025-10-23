@@ -279,11 +279,23 @@ class MoviePipeline:
         collection = self.db[collection_name]
         collection.drop()
 
-    def insert_documents(self, collection_name, df):
+    def insert_documents(self, collection_name, df, chunk_size=100000):
         collection = self.db[collection_name]
-        documents = df.to_dict("records")
-        collection.insert_many(documents)
-        print("Inserted documents: ", len(documents))
+
+        total_inserted = 0
+        total_rows = len(df)
+
+        for i in range(0, total_rows, chunk_size):
+            df_chunk = df.iloc[i:i + chunk_size]
+            documents = df_chunk.to_dict("records")
+
+            try:
+                collection.insert_many(documents)
+                total_inserted += len(documents)
+                print(
+                    f" -> Inserted batch {i // chunk_size + 1} to {collection_name}. Total documents inserted: {total_inserted}/{total_rows}")
+            except Exception as e:
+                print(f"Warning: Failed to insert batch starting at index {i}. Error: {e}")
 
     def show_coll(self):
         collections = self.client['movie_db'].list_collection_names()
@@ -294,6 +306,10 @@ def main():
     program = None
     try:
         program = MoviePipeline()
+
+        program.drop_coll(collection_name="Movie")
+        program.drop_coll(collection_name="Credits")
+        program.drop_coll(collection_name="Ratings")
 
         program.create_coll(collection_name="Movie")
         program.create_coll(collection_name="Credits")
@@ -311,10 +327,6 @@ def main():
         program.insert_documents("Movie", df_movies)
         program.insert_documents("Credits", df_credits)
         program.insert_documents("Ratings", df_ratings)
-
-        #program.drop_coll(collection_name="Movie")
-        #program.drop_coll(collection_name="Credits")
-        #program.drop_coll(collection_name="Ratings")
 
 
 
