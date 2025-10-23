@@ -78,6 +78,7 @@ class MoviePipeline:
         df_movies['adult'] = df_movies['adult'].map({'False': False, 'True': True})
         df_movies['video'] = df_movies['video'].fillna(False).astype(bool)
         df_movies['release_date'] = pd.to_datetime(df_movies['release_date'], errors='coerce')
+        df_movies['release_date'] = df_movies['release_date'].replace({pd.NaT: None})
         df_movies = df_movies.drop(['poster_path', 'homepage'], axis=1, errors='ignore')
 
         # Normalize imdbId to only contain numbers
@@ -103,7 +104,7 @@ class MoviePipeline:
         valid_ratings = {0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0}
         # check if it is in this sete
         df_ratings = df_ratings[df_ratings['rating'].isin(valid_ratings)]
-        df_ratings['timestamp'] = pd.to_datetime(df_ratings['timestamp'], unit='s', errors='coerce')
+        df_ratings['timestamp'] = pd.to_datetime(df_ratings['timestamp'], errors='coerce')
         return df_ratings
 
     def clean_credits(self):
@@ -298,7 +299,7 @@ def main():
         program.create_coll(collection_name="Credits")
         program.create_coll(collection_name="Ratings")
 
-        df_movies = program.clean_keywords()
+        df_movies = program.clean_movies()
         df_links = program.clean_links()
         df_credits = program.clean_credits()
         df_ratings = program.clean_ratings()
