@@ -4,13 +4,24 @@ import pandas as pd
 import ast
 import unicodedata
 
-def parse_json(x):
+
+def parse_json_list(x):
     if pd.isna(x) or x == "":
         return []
     try:
         return ast.literal_eval(x)
     except(ValueError, SyntaxError):
         return []
+
+
+def parse_json_obj(x):
+    if pd.isna(x) or x == "":
+        return None
+    try:
+        v = ast.literal_eval(x)
+        return v if isinstance(v, dict) else None
+    except (ValueError, SyntaxError):
+        return None
 
 
 def normalize_term(s: str) -> str:
@@ -25,6 +36,7 @@ def normalize_id(s: pd.Series) -> pd.Series:
                  .str.replace(r'^tt', '', regex=True)
                  .str.replace(r'\D+', '', regex=True))
     return pd.to_numeric(cleaned, errors='coerce').astype('Int64')
+
 
 def create_coll(self, collection_name):
     collection = self.db.create_collection(collection_name)
@@ -49,7 +61,7 @@ class MoviePipeline:
         df_movies['popularity'] = pd.to_numeric(df_movies['popularity'], errors='coerce')
         df_movies['id'] = pd.to_numeric(df_movies['id'], errors='coerce')
 
-        # Drop NaN values, as they should not exist in id,budget and revenue.
+        # Drop NaN in required cols and cast to int
         df_movies = df_movies.dropna(subset=['id', 'budget', 'revenue'])
         df_movies[['id', 'budget', 'revenue']] = df_movies[['id', 'budget', 'revenue']].astype('int64')
         df_movies = df_movies.sort_values(
@@ -62,14 +74,24 @@ class MoviePipeline:
         df_movies = df_movies.reset_index(drop=True)
 
         # Embedded columns
-        cols = [
-            "belongs_to_collection", "genres",
-            "production_companies", "production_countries",
-            "spoken_languages"
-        ]
-        # Parse it to string to a dictionary.
-        for col in cols:
-            df_movies[col] = df_movies[col].apply(parse_json)
+        array_cols = ["genres", "production_companies", "production_countries","spoken_languages"]
+        object_cols = ["belongs_to_collection"]
+
+        for col in array_cols:
+            df_movies[col] = df_movies[col].apply(parse_json_list)
+
+        for col in object_cols:
+            df_movies[col] = df_movies[col].apply(parse_json_obj)
+
+        def _sanitize_collection(d):
+            if not isinstance(d, dict):
+                return None
+            # Accept if it has an id (number or string) and a non-empty name
+            has_id = 'id' in d and d['id'] is not None
+            has_name = isinstance(d.get('name'), str) and d['name'].strip() != ""
+            return d if has_id and has_name else None
+
+        df_movies['belongs_to_collection'] = df_movies['belongs_to_collection'].apply(_sanitize_collection)
 
         # Mapping boolean values
         df_movies['video'] = df_movies['video'].replace('', 'False')
@@ -108,96 +130,100 @@ class MoviePipeline:
         return df_ratings
 
     def clean_credits(self):
+        import pandas as pd
         df_credits = pd.read_csv("movies/credits.csv")
 
-        df_credits["cast"] = df_credits["cast"].apply(parse_json)
-        df_credits["crew"] = df_credits["crew"].apply(parse_json)
+        # Remove entries with no id
+        df_credits["id"] = pd.to_numeric(df_credits["id"], errors="coerce").astype("Int64")
+        df_credits = df_credits.dropna(subset=["id"]).copy()
 
-        ex_crew = (
-            df_credits[["id", "crew"]]
-            .rename(columns={"id": "tmdbId"})
-            .explode("crew", ignore_index=True)
-        )
+        # Convert list strings to actual lists (json objects)
+        df_credits["cast"] = df_credits["cast"].apply(parse_json_list)
+        df_credits["crew"] = df_credits["crew"].apply(parse_json_list)
 
-        ex_cast = (
-            df_credits[["id", "cast"]]
-            .rename(columns={"id": "tmdbId"})
-            .explode("cast", ignore_index=True)
-        )
+        # --- CREW ---
+        ex_crew = df_credits.set_index('id')['crew'].explode().rename('crew_dict')
+        df_crew = ex_crew.to_frame()
+        df_crew = df_crew[df_crew['crew_dict'].apply(lambda x: isinstance(x, dict))]
+        df_crew_normalized = pd.json_normalize(df_crew['crew_dict'])
+        df_crew_normalized['tmdbId'] = df_crew.index.values
 
-        # Keep only dicts, drop the rest early
-        ex_crew["crew"] = ex_crew["crew"].apply(lambda x: x if isinstance(x, dict) else None)
-        ex_crew = ex_crew.dropna(subset=["crew"]).copy()
+        # --- CAST ---
+        ex_cast = df_credits.set_index('id')['cast'].explode().rename('cast_dict')
+        df_cast = ex_cast.to_frame()
+        df_cast = df_cast[df_cast['cast_dict'].apply(lambda x: isinstance(x, dict))]
+        df_cast_normalized = pd.json_normalize(df_cast['cast_dict'])
+        df_cast_normalized['tmdbId'] = df_cast.index.values
 
-        ex_cast["cast"] = ex_cast["cast"].apply(lambda x: x if isinstance(x, dict) else None)
-        ex_cast = ex_cast.dropna(subset=["cast"]).copy()
+        # Select and rename columns
+        df_crew = df_crew_normalized.rename(columns={"id": "person_id"})
+        df_crew = df_crew[["tmdbId", "person_id", "name", "gender", "department", "job"]].copy()
 
-        # Normalize dicts to columns
-        df_crew = pd.json_normalize(ex_crew["crew"])
-        df_crew["tmdbId"] = ex_crew["tmdbId"].values
+        df_cast = df_cast_normalized.rename(columns={"id": "person_id"})
+        df_cast = df_cast[["tmdbId", "person_id", "name", "gender", "character", "order"]].copy()
 
-        df_cast = pd.json_normalize(ex_cast["cast"])
-        df_cast["tmdbId"] = ex_cast["tmdbId"]
+        # Use 'Int64' (nullable integer) for IDs and numeric values
+        for col in ["person_id", "gender"]:
+            df_crew[col] = pd.to_numeric(df_crew[col], errors="coerce").astype("Int64")
+            df_cast[col] = pd.to_numeric(df_cast[col], errors="coerce").astype("Int64")
 
-        # Select columns to keep
-        df_crew = df_crew[["tmdbId", "id", "name", "gender", "department", "job"]]
-
-        df_cast = df_cast[["tmdbId", "id", "name", "gender", "character", "order"]]
-
-        # Types and validation
-        df_crew["id"] = pd.to_numeric(df_crew["id"], errors="coerce").astype("Int64")
-        df_crew["gender"] = pd.to_numeric(df_crew["gender"], errors="coerce").astype("Int64")
-        df_crew["name"] = df_crew["name"].astype("string")
-        df_crew["department"] = df_crew["department"].astype("string")
-        df_crew["job"] = df_crew["job"].astype("string")
-
-        df_cast["id"] = pd.to_numeric(df_cast["id"], errors="coerce").astype("Int64")
-        df_cast["gender"] = pd.to_numeric(df_cast["gender"], errors="coerce").astype("Int64")
         df_cast["order"] = pd.to_numeric(df_cast["order"], errors="coerce").astype("Int64")
-        df_cast["name"] = df_cast["name"].astype("string")
-        df_cast["character"] = df_cast["character"].astype("string")
 
-        # Removing duplicates, defining dedupe keys
-        cast_subset = ["tmdbId", "id", "character"]
-        crew_subset = ["tmdbId", "id", "job", "department"]
+        # Deduplication is performed on the primary movie/person/role key
+        cast_subset = ["tmdbId", "person_id", "character"]
+        crew_subset = ["tmdbId", "person_id", "job", "department"]
 
-        # Count number of duplicates (extra copies beyond the first)
-        cast_duplicates = df_cast[cast_subset].dropna().duplicated().sum()
-        crew_duplicates = df_crew[crew_subset].dropna().duplicated().sum()
+        # Count all duplicates
+        cast_duplicates = df_cast.duplicated(subset=cast_subset, keep=False).sum() // 2
+        crew_duplicates = df_crew.duplicated(subset=crew_subset, keep=False).sum() // 2
 
         print(f"Number of cast duplicates: {cast_duplicates}")
         print(f"Number of crew duplicates: {crew_duplicates}")
 
-        # Removing duplicates (keep first)
-        if cast_duplicates:
-            before_cast = len(df_cast)
-            df_cast = df_cast.drop_duplicates(subset=cast_subset, keep="first").reset_index(drop=True)
-            removed_cast = before_cast - len(df_cast)
-            print(f"Removed {removed_cast} cast entries. {len(df_cast)} remain.")
+        # Remove all duplicates (keep first)
+        before_cast = len(df_cast)
+        df_cast = df_cast.drop_duplicates(subset=cast_subset, keep="first").reset_index(drop=True)
+        removed_cast = before_cast - len(df_cast)
+        print(f"Removed {removed_cast} cast entries. {len(df_cast)} remain.")
 
-        if crew_duplicates:
-            before_crew = len(df_crew)
-            df_crew = df_crew.drop_duplicates(subset=crew_subset, keep="first").reset_index(drop=True)
-            removed_crew = before_crew - len(df_crew)
-            print(f"Removed {removed_crew} crew entries. {len(df_crew)} remain.")
+        before_crew = len(df_crew)
+        df_crew = df_crew.drop_duplicates(subset=crew_subset, keep="first").reset_index(drop=True)
+        removed_crew = before_crew - len(df_crew)
+        print(f"Removed {removed_crew} crew entries. {len(df_crew)} remain.")
 
-        cast_grouped = (
-            df_cast
-            .groupby("tmdbId", dropna=False)[["id", "name", "gender", "character", "order"]]
-            .apply(lambda g: g.dropna(how="all").to_dict("records"))
-            .reset_index(name="cast")
-        )
 
-        crew_grouped = (
-            df_crew
-            .groupby("tmdbId", dropna=False)[["id", "name", "gender", "department", "job"]]
-            .apply(lambda g: g.dropna(how="all").to_dict("records"))
-            .reset_index(name="crew")
-        )
+        # Helper function to create the desired dict from a row
+        def create_cast_dict(row):
+            return {
+                'id': row['person_id'],
+                'name': row['name'],
+                'gender': row['gender'],
+                'character': row['character'],
+                'order': row['order']
+            }
 
+        def create_crew_dict(row):
+            return {
+                'id': row['person_id'],
+                'name': row['name'],
+                'gender': row['gender'],
+                'department': row['department'],
+                'job': row['job']
+            }
+
+        # Apply the helper functions to create a dictionary column for each person
+        df_cast['cast_member'] = df_cast.apply(create_cast_dict, axis=1)
+        df_crew['crew_member'] = df_crew.apply(create_crew_dict, axis=1)
+
+        # Group the dictionary lists
+        # Group the dictionary columns (cast_member/crew_member) into a list for each movie
+        cast_grouped = df_cast.groupby("tmdbId")['cast_member'].apply(list).reset_index(name="cast")
+        crew_grouped = df_crew.groupby("tmdbId")['crew_member'].apply(list).reset_index(name="crew")
+
+        # Final merge
         credits_df = cast_grouped.merge(crew_grouped, on="tmdbId", how="outer")
-        credits_df = credits_df.astype({"cast": "object", "crew": "object"})
 
+        # Ensure missing groups become empty lists
         for col in ["cast", "crew"]:
             credits_df[col] = credits_df[col].apply(lambda v: v if isinstance(v, list) else [])
 
@@ -206,7 +232,7 @@ class MoviePipeline:
     def clean_keywords(self):
         df_keywords = pd.read_csv("movies/keywords.csv")
 
-        df_keywords["keywords"] = df_keywords["keywords"].apply(parse_json)
+        df_keywords["keywords"] = df_keywords["keywords"].apply(parse_json_list)
 
         ex_keywords = (
             df_keywords[["id", "keywords"]]
@@ -266,6 +292,53 @@ class MoviePipeline:
         df_movies = df_movies.merge(df_links, on=['tmdbId'], how='left')
         return df_movies
 
+    def build_user_stats(self, df_movies, df_ratings):
+        """
+        Compute per-user rating statistics and genre diversity using pandas.
+        """
+        # 1) Keep only required columns
+        df_movies = df_movies[["movieId", "genres"]].copy()
+        df_ratings = df_ratings[["userId", "movieId", "rating"]].copy()
+
+        # 2)  Merge ratings and genres
+        merged = df_ratings.merge(df_movies, on="movieId", how="left")
+
+        # Clean genres into name lists
+        merged["genres"] = merged["genres"].apply(
+            lambda g: [d.get("name") for d in g if isinstance(d, dict) and "name" in d]
+            if isinstance(g, list) else []
+        )
+
+        # 3) Compute per-user stats
+        user_stats = (
+            merged.groupby("userId")["rating"]
+            .agg(["count", "mean", "var"])
+            .rename(columns={"count": "ratingCount", "mean": "ratingMean", "var": "ratingVariance"})
+            .reset_index()
+        )
+
+        # 4) Count distinct genres
+        exploded = merged.explode("genres", ignore_index=True)
+        genre_counts = (
+            exploded.dropna(subset=["genres"])
+            .groupby("userId")["genres"]
+            .nunique()
+            .reset_index(name="distinctGenres")
+        )
+
+        # 5) Merge both sets of stats
+        df_users = user_stats.merge(
+            genre_counts, on="userId", how="left").fillna({"distinctGenres": 0})
+        df_users = df_users[user_stats["ratingCount"] >= 20].reset_index(drop=True)
+
+        # 6) Round values
+        df_users["ratingVariance"] = df_users["ratingVariance"].round(3)
+        df_users["ratingMean"] = df_users["ratingMean"].round(2)
+        df_users["distinctGenres"] = df_users["distinctGenres"].astype(int)
+
+        return df_users
+
+
     def create_coll(self, collection_name):
         existing = self.db.list_collection_names()
 
@@ -310,10 +383,12 @@ def main():
         program.drop_coll(collection_name="Movie")
         program.drop_coll(collection_name="Credits")
         program.drop_coll(collection_name="Ratings")
+        program.drop_coll(collection_name="Users")
 
         program.create_coll(collection_name="Movie")
         program.create_coll(collection_name="Credits")
         program.create_coll(collection_name="Ratings")
+        program.create_coll(collection_name="Users")
 
         df_movies = program.clean_movies()
         df_links = program.clean_links()
@@ -324,17 +399,19 @@ def main():
         df_movies = program.merge_movies_and_links(df_movies, df_links)
         df_movies = program.merge_keywords(df_movies, df_keywords)
 
+        df_users = program.build_user_stats(df_movies, df_ratings)
         program.insert_documents("Movie", df_movies)
         program.insert_documents("Credits", df_credits)
         program.insert_documents("Ratings", df_ratings)
+        program.insert_documents("Users", df_users)
 
         print("started creating index")
-        # program.db.Movie.create_index("tmdbId")
-        # program.db.Credits.create_index("tmdbId")
-        # program.db.Ratings.create_index("movieId")
-        # program.db.Movie.create_index("movieId")
-        #
-        # NB: very important to create index if we do text search (task 7)
+        program.db.Movie.create_index("tmdbId")
+        program.db.Credits.create_index("tmdbId")
+        program.db.Ratings.create_index("movieId")
+        program.db.Movie.create_index("movieId")
+
+        # NB: very important to create index if we do text search (see task 7)
         program.db.Movie.create_index([("overview", "text"), ("tagline", "text"), ("keywords", "text")])
 
         print("finished creating index")
