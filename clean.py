@@ -328,7 +328,16 @@ def main():
         program.insert_documents("Credits", df_credits)
         program.insert_documents("Ratings", df_ratings)
 
+        print("started creating index")
+        # program.db.Movie.create_index("tmdbId")
+        # program.db.Credits.create_index("tmdbId")
+        # program.db.Ratings.create_index("movieId")
+        # program.db.Movie.create_index("movieId")
+        #
+        # NB: very important to create index if we do text search (task 7)
+        program.db.Movie.create_index([("overview", "text"), ("tagline", "text"), ("keywords", "text")])
 
+        print("finished creating index")
 
         program.show_coll()
     except Exception as e:
