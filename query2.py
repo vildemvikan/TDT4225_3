@@ -11,6 +11,7 @@ from pipelines.T10 import t10A_pipeline, t10B_pipeline
 from DbConnector import DbConnector
 from pymongo.errors import PyMongoError
 
+# This file includes the query tasks: 2,4,6,8,10
 
 class QueryPipeline:
     def __init__(self):
